@@ -1,0 +1,57 @@
+# Local secrets and configuration
+.env
+.env.*
+!.env.example
+.agent_policy.yaml
+.mcp.json
+.agent_mcp.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyright/
+.coverage
+.coverage.*
+htmlcov/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+
+# Editors, operating systems, and local agent tooling
+.vscode/
+.idea/
+.agents/
+.codex/
+.DS_Store
+Thumbs.db
+
+# Temporary inventory files
+_tree.txt
+_tmp_files.txt
+
+# Workspace-local agent state
+.tasks/
+.worktrees/
+.mailboxes/
+.memory/
+.transcripts/
+.task_outputs/
+.agent_events/
+.agent_sessions/
+.agent_runs/
+.scheduled_tasks.json
+
+# Local reference checkouts
+external_repos/
+
+# Web UI dependencies and generated output
+webui/node_modules/
+webui/dist/
+webui/coverage/
+webui/tsconfig.tsbuildinfo
+webui/*.log
