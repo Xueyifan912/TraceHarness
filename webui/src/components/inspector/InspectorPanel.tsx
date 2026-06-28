@@ -268,10 +268,14 @@ export function InspectorPanel({
     const team = teamResult.status === "fulfilled" ? teamResult.value : null;
     if (teamResult.status === "rejected") {
       errors.push(`Team：${formatError(teamResult.reason)}`);
+    } else if (team?.warnings?.length) {
+      errors.push(...team.warnings);
     }
     const tasks = tasksResult.status === "fulfilled" ? tasksResult.value.tasks : team?.tasks ?? [];
     if (tasksResult.status === "rejected") {
       errors.push(`Tasks：${formatError(tasksResult.reason)}`);
+    } else if (tasksResult.value.warnings?.length) {
+      errors.push(...tasksResult.value.warnings);
     }
     const worktrees = worktreesResult.status === "fulfilled" ? worktreesResult.value.worktrees : team?.worktrees ?? [];
     if (worktreesResult.status === "rejected") {

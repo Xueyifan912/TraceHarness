@@ -5,6 +5,7 @@ from ..config import (
     DEFAULT_MAX_TOKENS,
     ESCALATED_MAX_TOKENS,
     MAX_RECOVERY_RETRIES,
+    terminal_print,
 )
 from ..context_compaction import compact_history, reactive_compact
 from ..cron_scheduler import consume_cron_queue
@@ -229,7 +230,7 @@ class AgentLoop:
                 trigger_hooks("PostToolUse", block, output)
                 raise_if_cancelled()
                 log_tool_call_ended(block, output)
-                print(str(output)[:300])
+                terminal_print(str(output)[:300])
 
                 if block.name == "todo_write":
                     self.rounds_since_todo = 0

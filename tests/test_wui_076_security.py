@@ -357,6 +357,34 @@ def test_cron_queue_is_scoped_to_session(tmp_path):
         assert [job.id for job in cron.consume_cron_queue()] == ["cron_a"]
 
 
+def test_todos_are_persisted_and_isolated_by_session(tmp_path):
+    from coding_agent.runtime.events import event_context
+    from coding_agent.runtime.execution import execution_context
+    from coding_agent.tools.basic import run_todo_read, run_todo_write
+
+    todos = [{
+        "content": "review lifecycle",
+        "status": "in_progress",
+    }]
+    with execution_context(workspace=tmp_path, source="web"):
+        with event_context(
+            session_id="session_a",
+            source="web",
+            workspace=tmp_path,
+        ):
+            assert run_todo_write(todos) == "Updated 1 todos"
+            assert "review lifecycle" in run_todo_read()
+        with event_context(
+            session_id="session_b",
+            source="web",
+            workspace=tmp_path,
+        ):
+            assert run_todo_read() == "No todos."
+
+    todo_path = tmp_path / ".agent_todos" / "session_a.json"
+    assert json.loads(todo_path.read_text(encoding="utf-8"))["todos"] == todos
+
+
 def test_message_bus_validates_mailbox_names_and_preserves_messages(
         monkeypatch, tmp_path):
     from coding_agent import teams as teams_mod

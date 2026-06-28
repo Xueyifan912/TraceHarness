@@ -56,6 +56,24 @@ def test_tasks_and_worktrees_status_are_structured(tmp_path):
     }]
 
 
+def test_task_status_reports_corrupt_records(tmp_path):
+    client = _client(tmp_path)
+    tasks_dir = tmp_path / ".tasks"
+    tasks_dir.mkdir()
+    (tasks_dir / "task_broken.json").write_text(
+        "{not-json",
+        encoding="utf-8",
+    )
+
+    tasks = client.get("/api/tasks")
+    team = client.get("/api/team/status")
+
+    assert tasks.status_code == 200
+    assert tasks.json()["tasks"] == []
+    assert "task_broken.json" in tasks.json()["warnings"][0]
+    assert team.json()["warnings"] == tasks.json()["warnings"]
+
+
 def test_team_status_prioritizes_structured_state(monkeypatch, tmp_path):
     from coding_agent import teams as teams_mod
 

@@ -27,11 +27,15 @@ class HealthResponse(BaseModel):
 
 
 class SessionCreateRequest(BaseModel):
-    title: str | None = None
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = Field(default=None, max_length=200)
     initial_message: str | None = None
 
 
 class MessageOptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     save: bool = True
 
 
@@ -42,6 +46,7 @@ class MessageRequest(BaseModel):
 
 class SessionSummary(BaseModel):
     session_id: str
+    title: str | None = None
     created_at: str | None = None
     updated_at: str | None = None
     workspace_path: str | None = None
@@ -57,6 +62,7 @@ class SessionCreateResponse(BaseModel):
 
 class SessionListResponse(BaseModel):
     sessions: list[SessionSummary]
+    warnings: list[str] = Field(default_factory=list)
 
 
 class SessionDetailResponse(BaseModel):
@@ -124,10 +130,12 @@ class TeamStatusResponse(BaseModel):
     tasks: list[dict[str, Any]]
     worktrees: list[dict[str, Any]]
     raw_text: str
+    warnings: list[str] = Field(default_factory=list)
 
 
 class TasksResponse(BaseModel):
     tasks: list[dict[str, Any]]
+    warnings: list[str] = Field(default_factory=list)
 
 
 class WorktreesResponse(BaseModel):

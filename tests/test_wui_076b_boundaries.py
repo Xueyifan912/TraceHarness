@@ -95,12 +95,20 @@ def test_web_run_bash_uses_service_workspace(monkeypatch, tmp_path):
 
     calls = {"llm": 0, "cwd": None}
 
-    def fake_run(
-        command, shell, cwd, capture_output, text, errors, timeout
-    ):
-        assert errors == "replace"
-        calls["cwd"] = cwd
-        return SimpleNamespace(returncode=0, stdout=str(cwd), stderr="")
+    class FakeProcess:
+        pid = 12345
+
+        def __init__(self, command, *, shell, cwd, **kwargs):
+            del command, shell, kwargs
+            calls["cwd"] = cwd
+            self.returncode = 0
+
+        def poll(self):
+            return self.returncode
+
+        def communicate(self, timeout=None):
+            del timeout
+            return str(calls["cwd"]).encode("utf-8"), b""
 
     def fake_call_llm(messages, context, tools, state, max_tokens):
         calls["llm"] += 1
@@ -118,7 +126,7 @@ def test_web_run_bash_uses_service_workspace(monkeypatch, tmp_path):
             stop_reason="end_turn",
         )
 
-    monkeypatch.setattr(basic_mod.subprocess, "run", fake_run)
+    monkeypatch.setattr(basic_mod.subprocess, "Popen", FakeProcess)
     monkeypatch.setattr(loop_mod, "call_llm", fake_call_llm)
     (tmp_path / ".agent_policy.yaml").write_text(
         "bash:\n  default_action: allow\n",
@@ -131,6 +139,34 @@ def test_web_run_bash_uses_service_workspace(monkeypatch, tmp_path):
 
     assert response["run"]["status"] == "completed"
     assert Path(calls["cwd"]).resolve() == tmp_path.resolve()
+
+
+def test_process_output_prefers_utf8_over_windows_legacy_codepage(monkeypatch):
+    from coding_agent.tools import basic as basic_mod
+
+    monkeypatch.setattr(
+        basic_mod.locale,
+        "getpreferredencoding",
+        lambda _do_setlocale=False: "cp936",
+    )
+
+    assert basic_mod._decode_process_output(
+        "中文路径".encode("utf-8")
+    ) == "中文路径"
+
+
+def test_console_text_is_safe_for_legacy_windows_stdout(monkeypatch):
+    from coding_agent import config
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            config.sys,
+            "stdout",
+            SimpleNamespace(encoding="ascii"),
+        )
+        rendered = config.console_safe_text("中文🙂")
+
+    assert rendered == "???"
 
 
 class _SequenceProvider:

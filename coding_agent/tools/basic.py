@@ -1,12 +1,24 @@
 import ast
 import json
+import locale
+import os
+import signal
 import subprocess
+import time
 from pathlib import Path
 
 from ..config import WORKDIR
+from ..runtime.cancellation import cancellation_requested
 from ..runtime.execution import execution_workspace
+from ..runtime.events import current_event_context
+from ..runtime.fileio import (
+    atomic_write_text,
+    exclusive_file_lock,
+    safe_runtime_path,
+)
 
-CURRENT_TODOS: list[dict] = []
+BASH_TIMEOUT_SECONDS = 120.0
+TODO_DIR_NAME = ".agent_todos"
 
 # ── Basic Tools ──
 
@@ -26,17 +38,94 @@ def safe_path(p: str, cwd: Path = None) -> Path:
     return path
 
 
+def _decode_process_output(data: bytes) -> str:
+    if not data:
+        return ""
+    encodings = ["utf-8-sig", locale.getpreferredencoding(False)]
+    if os.name == "nt":
+        encodings.append("mbcs")
+    tried = set()
+    for encoding in encodings:
+        key = encoding.casefold()
+        if key in tried:
+            continue
+        tried.add(key)
+        try:
+            return data.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
+def _terminate_process_tree(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        if os.name == "nt":
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+        else:
+            os.killpg(process.pid, signal.SIGTERM)
+    except Exception:
+        try:
+            process.terminate()
+        except Exception:
+            pass
+    try:
+        process.wait(timeout=2)
+    except Exception:
+        try:
+            if os.name == "nt":
+                process.kill()
+            else:
+                os.killpg(process.pid, signal.SIGKILL)
+        except Exception:
+            pass
+
+
 def run_bash(command: str, cwd: Path = None,
              run_in_background: bool = False) -> str:
     # run_in_background is consumed by the dispatcher; direct execution ignores it.
+    process: subprocess.Popen | None = None
     try:
-        r = subprocess.run(command, shell=True, cwd=_tool_base(cwd),
-                           capture_output=True, text=True, errors="replace",
-                           timeout=120)
-        out = (r.stdout + r.stderr).strip()
+        kwargs = {
+            "shell": True,
+            "cwd": _tool_base(cwd),
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+        }
+        if os.name == "nt":
+            kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        else:
+            kwargs["start_new_session"] = True
+        process = subprocess.Popen(command, **kwargs)
+        deadline = time.monotonic() + BASH_TIMEOUT_SECONDS
+        while True:
+            if cancellation_requested():
+                _terminate_process_tree(process)
+                stdout, stderr = process.communicate()
+                output = _decode_process_output(stdout + stderr).strip()
+                return f"Error: Cancelled{f': {output}' if output else ''}"
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _terminate_process_tree(process)
+                process.communicate()
+                return f"Error: Timeout ({BASH_TIMEOUT_SECONDS:g}s)"
+            try:
+                stdout, stderr = process.communicate(timeout=min(0.1, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                continue
+        out = _decode_process_output(stdout + stderr).strip()
         return out[:50000] if out else "(no output)"
-    except subprocess.TimeoutExpired:
-        return "Error: Timeout (120s)"
+    except Exception as exc:
+        if process is not None:
+            _terminate_process_tree(process)
+        return f"Error: {type(exc).__name__}: {exc}"
 
 
 def run_read(path: str, limit: int | None = None,
@@ -118,12 +207,63 @@ def _normalize_todos(todos):
             return None, f"Error: todos[{i}] has invalid status '{todo['status']}'"
     return todos, None
 
+
+def _todo_scope() -> tuple[Path, str]:
+    workspace = execution_workspace(WORKDIR)
+    context = current_event_context()
+    session_id = str(context.get("session_id") or "cli")
+    safe_session = "".join(
+        character
+        if character.isalnum() or character in "._-"
+        else "_"
+        for character in session_id
+    ).strip("._-") or "cli"
+    directory = safe_runtime_path(
+        workspace,
+        TODO_DIR_NAME,
+        create_directory=True,
+    )
+    return directory / f"{safe_session}.json", session_id
+
+
 def run_todo_write(todos: list) -> str:
-    global CURRENT_TODOS
     todos, error = _normalize_todos(todos)
     if error:
         return error
-    CURRENT_TODOS = todos
-    print(f"  \033[33m[todo] updated {len(CURRENT_TODOS)} item(s)\033[0m")
-    return f"Updated {len(CURRENT_TODOS)} todos"
+    path, session_id = _todo_scope()
+    try:
+        with exclusive_file_lock(path.with_name(f".{path.name}.lock")):
+            atomic_write_text(
+                path,
+                json.dumps(
+                    {
+                        "session_id": session_id,
+                        "todos": todos,
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            )
+    except Exception as exc:
+        return f"Error: could not persist todos: {exc}"
+    print(f"  \033[33m[todo] updated {len(todos)} item(s)\033[0m")
+    return f"Updated {len(todos)} todos"
+
+
+def run_todo_read() -> str:
+    path, session_id = _todo_scope()
+    try:
+        if not path.exists():
+            return "No todos."
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if payload.get("session_id") != session_id:
+            return "Error: todo state does not match the current session"
+        todos, error = _normalize_todos(payload.get("todos"))
+        if error:
+            return error
+        if not todos:
+            return "No todos."
+        return json.dumps(todos, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        return f"Error: could not read todos: {exc}"
 

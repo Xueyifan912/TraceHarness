@@ -1,6 +1,7 @@
 """Runtime configuration shared by the agent harness."""
 
 import os
+import sys
 import threading
 from pathlib import Path
 
@@ -62,7 +63,17 @@ class _LazyAnthropicClient:
 client = _LazyAnthropicClient()
 
 
+def console_safe_text(text: object) -> str:
+    value = str(text)
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        return value.encode(encoding, errors="replace").decode(encoding)
+    except LookupError:
+        return value.encode("utf-8", errors="replace").decode("utf-8")
+
+
 def terminal_print(text: str):
+    text = console_safe_text(text)
     if threading.current_thread() is threading.main_thread() or not CLI_ACTIVE:
         print(text)
         return

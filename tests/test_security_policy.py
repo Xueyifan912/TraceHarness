@@ -68,6 +68,34 @@ def test_default_policy_asks_for_indirect_shell_execution(tmp_path):
     assert decision.reason == "Shell commands require explicit approval"
 
 
+@pytest.mark.parametrize(
+    ("tool", "tool_input", "rule"),
+    [
+        ("connect_mcp", {"name": "local-server"}, "mcp_process_start"),
+        (
+            "remove_worktree",
+            {"name": "feature", "discard_changes": True},
+            "worktree_removal",
+        ),
+    ],
+)
+def test_process_start_and_worktree_removal_require_approval(
+    tool,
+    tool_input,
+    rule,
+    tmp_path,
+):
+    from coding_agent.security.policy import evaluate_tool_use
+
+    decision = evaluate_tool_use(
+        _block(tool, tool_input),
+        workspace=tmp_path,
+    )
+
+    assert decision.action == "ask"
+    assert decision.rule == rule
+
+
 def test_workspace_policy_can_explicitly_allow_unmatched_shell(tmp_path):
     from coding_agent.security.policy import evaluate_tool_use, load_policy
 

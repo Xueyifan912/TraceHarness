@@ -44,7 +44,7 @@ function makePendingRun(sessionId: string): RunSummary {
   };
 }
 
-const ACTIVE_RUN_STATUSES = new Set(["queued", "running", "waiting_approval"]);
+const ACTIVE_RUN_STATUSES = new Set(["queued", "running", "waiting_approval", "cancelling"]);
 const TERMINAL_RUN_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
 function isActiveRunStatus(status: string | null | undefined): boolean {
@@ -257,6 +257,24 @@ function timelineItemFromRunEvent(event: RunEvent): TimelineItem | null {
       tool_use_id: typeof payload.tool_use_id === "string" ? payload.tool_use_id : undefined,
       input_preview: payload.input,
       output_preview: typeof payload.output_preview === "string" ? payload.output_preview : undefined
+    };
+  }
+
+  if (event.type === "background_completion") {
+    const toolUseId = String(
+      payload.tool_use_id ?? payload.background_id ?? event.event_id
+    );
+    return {
+      id: `tool_${toolUseId}`,
+      type: "tool_call",
+      title: String(payload.tool ?? "background tool"),
+      status: String(payload.status ?? "completed"),
+      ended_at: event.ts ?? undefined,
+      tool_use_id:
+        typeof payload.tool_use_id === "string"
+          ? payload.tool_use_id
+          : undefined,
+      background_id: payload.background_id
     };
   }
 
@@ -480,7 +498,19 @@ export default function App() {
     async (sessionId: string) => {
       const requestSessionId = sessionId;
       const requestId = ++sessionDetailRequestRef.current;
+      const sessionChanged =
+        selectedSessionIdRef.current !== requestSessionId;
       selectSessionId(requestSessionId);
+      if (sessionChanged) {
+        sidecarRequestRef.current += 1;
+        setMessages([]);
+        setTimelineItems([]);
+        setEvents([]);
+        setTimelineNotice(null);
+        setIsLoadingSidecar(false);
+        currentRunRef.current = null;
+        setCurrentRun(null);
+      }
       setIsLoadingSession(true);
       setError(null);
       try {
@@ -591,6 +621,9 @@ export default function App() {
           return;
         }
         setHealth(healthResult);
+        if (sessionResult.warnings?.length) {
+          setError(sessionResult.warnings.join("；"));
+        }
         const reconciledSessions = reconcileSessionsWithRun(
           sessionResult.sessions,
           currentRunRef.current
@@ -1141,7 +1174,8 @@ export default function App() {
       if (
         current &&
         current.run_id === approval.run_id &&
-        isActiveRunStatus(current.status)
+        isActiveRunStatus(current.status) &&
+        current.status !== "cancelling"
       ) {
         const resumedRun = {
           ...current,
@@ -1224,7 +1258,9 @@ export default function App() {
         : isTerminalSyncCurrent
           ? "正在同步最终回答"
           : isRunActive
-            ? "运行正在进行"
+            ? currentRunBelongsToSelected && currentRun?.status === "cancelling"
+              ? "正在停止运行"
+              : "运行正在进行"
             : isLoadingSession
               ? "会话正在加载"
               : null;
@@ -1234,7 +1270,7 @@ export default function App() {
       return "Coding Agent Workbench";
     }
     const preview = selectedSession.last_user_prompt_preview?.preview;
-    return preview || "新会话";
+    return selectedSession.title || preview || "新会话";
   }, [selectedSession]);
 
   const shellSubtitle = selectedSession
@@ -1282,7 +1318,7 @@ export default function App() {
       inspector={
         <InspectorPanel
           session={selectedSession}
-          currentRun={currentRun}
+          currentRun={currentRunBelongsToSelected ? currentRun : null}
           isRunning={isRunning}
           timelineItems={timelineItems}
           events={events}

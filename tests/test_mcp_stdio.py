@@ -16,25 +16,15 @@ import sys
 
 
 def read_message():
-    headers = {}
-    while True:
-        line = sys.stdin.buffer.readline()
-        if line == b"":
-            return None
-        line = line.decode("ascii").strip()
-        if not line:
-            break
-        key, _, value = line.partition(":")
-        headers[key.lower()] = value.strip()
-    length = int(headers.get("content-length", "0"))
-    body = sys.stdin.buffer.read(length)
-    return json.loads(body.decode("utf-8"))
+    line = sys.stdin.buffer.readline()
+    if line == b"":
+        return None
+    return json.loads(line.decode("utf-8"))
 
 
 def write_message(payload):
     body = json.dumps(payload).encode("utf-8")
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii"))
-    sys.stdout.buffer.write(body)
+    sys.stdout.buffer.write(body + b"\n")
     sys.stdout.buffer.flush()
 
 

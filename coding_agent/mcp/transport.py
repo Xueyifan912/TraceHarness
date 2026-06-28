@@ -170,9 +170,12 @@ class StdioMCPTransport:
         if not self.process.stdin:
             return f"MCP error: server '{self.config.name}' stdin unavailable"
         try:
-            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            header = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
-            self.process.stdin.write(header + body)
+            body = json.dumps(
+                payload,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            self.process.stdin.write(body + b"\n")
             self.process.stdin.flush()
             return None
         except Exception as e:
@@ -182,24 +185,14 @@ class StdioMCPTransport:
         if not self.process or not self.process.stdout:
             return {}, f"MCP error: server '{self.config.name}' stdout unavailable"
         try:
-            headers: dict[str, str] = {}
             while True:
                 line = self.process.stdout.readline()
                 if line == b"":
                     stderr = self._stderr_preview()
                     return {}, f"MCP error: server closed stdout{stderr}"
-                line = line.decode("ascii", errors="replace").strip()
-                if not line:
+                if line.strip():
                     break
-                key, _, value = line.partition(":")
-                headers[key.lower()] = value.strip()
-            length = int(headers.get("content-length", "0"))
-            if length <= 0:
-                return {}, "MCP error: missing Content-Length"
-            body = self.process.stdout.read(length)
-            if len(body) != length:
-                return {}, "MCP error: incomplete response body"
-            message = json.loads(body.decode("utf-8"))
+            message = json.loads(line.decode("utf-8"))
             if not isinstance(message, dict):
                 return {}, "MCP error: invalid JSON-RPC response"
             return message, None

@@ -28,6 +28,7 @@ class SessionRecord:
     created_at: str
     workspace_path: str
     path: Path
+    title: str | None = None
 
 
 def _utc_timestamp() -> str:
@@ -235,7 +236,11 @@ def _write_json(path: Path, payload: dict[str, Any]) -> bool:
         return False
 
 
-def create_session(workspace: str | Path | None = None) -> SessionRecord:
+def create_session(
+    workspace: str | Path | None = None,
+    *,
+    title: str | None = None,
+) -> SessionRecord:
     root = _workspace(workspace)
     created_at = _utc_timestamp()
     session_id = f"{created_at.replace(':', '').replace('.', '-')}-{uuid4().hex[:8]}"
@@ -244,6 +249,7 @@ def create_session(workspace: str | Path | None = None) -> SessionRecord:
         created_at=created_at,
         workspace_path=str(root),
         path=_session_path(session_id, root),
+        title=title,
     )
     payload = {
         "snapshot_version": SNAPSHOT_VERSION,
@@ -251,6 +257,7 @@ def create_session(workspace: str | Path | None = None) -> SessionRecord:
         "created_at": record.created_at,
         "updated_at": record.created_at,
         "workspace_path": record.workspace_path,
+        "title": record.title,
         "message_count": 0,
         "display_message_count": 0,
         "last_user_prompt_preview": None,
@@ -285,6 +292,7 @@ def save_session_snapshot(
             "created_at": session.created_at,
             "updated_at": updated_at,
             "workspace_path": session.workspace_path,
+            "title": session.title,
             "message_count": len(messages),
             "display_message_count": len(visible_messages),
             "last_user_prompt_preview": (
@@ -309,13 +317,23 @@ def save_session_snapshot(
 def load_session(session_id: str, workspace: str | Path | None = None) -> dict[str, Any] | None:
     try:
         path = _session_path(session_id, workspace)
-        return _normalize_loaded_session(json.loads(path.read_text(encoding="utf-8")))
+        loaded = _normalize_loaded_session(
+            json.loads(path.read_text(encoding="utf-8"))
+        )
+        if loaded.get("session_id") != session_id:
+            return None
+        return loaded
     except Exception:
         return None
 
 
-def list_recent_sessions(workspace: str | Path | None = None,
-                         limit: int = 10) -> list[dict[str, Any]]:
+def scan_recent_sessions(
+    workspace: str | Path | None = None,
+    limit: int = 10,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    bounded_limit = max(int(limit), 0)
+    if bounded_limit == 0:
+        return [], []
     try:
         paths = sorted(
             session_dir(workspace).glob("*.json"),
@@ -323,19 +341,33 @@ def list_recent_sessions(workspace: str | Path | None = None,
             reverse=True,
         )
     except Exception:
-        return []
+        return [], ["Session directory could not be read."]
 
     sessions = []
-    for path in paths[:max(int(limit), 0)]:
+    warnings: list[str] = []
+    for path in paths:
+        if len(sessions) >= bounded_limit:
+            break
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
+            expected_session_id = path.stem
+            if (
+                not isinstance(data, dict)
+                or data.get("session_id") != expected_session_id
+            ):
+                raise ValueError("session id does not match its file name")
+        except Exception as exc:
+            warnings.append(
+                f"Unreadable session snapshot {path.name}: "
+                f"{type(exc).__name__}"
+            )
             continue
         sessions.append({
             "session_id": data.get("session_id"),
             "created_at": data.get("created_at"),
             "updated_at": data.get("updated_at"),
             "workspace_path": data.get("workspace_path"),
+            "title": data.get("title"),
             "message_count": data.get("message_count", 0),
             "display_message_count": data.get(
                 "display_message_count",
@@ -344,6 +376,12 @@ def list_recent_sessions(workspace: str | Path | None = None,
             "last_user_prompt_preview": data.get("last_user_prompt_preview"),
             "path": str(path),
         })
+    return sessions, warnings
+
+
+def list_recent_sessions(workspace: str | Path | None = None,
+                         limit: int = 10) -> list[dict[str, Any]]:
+    sessions, _warnings = scan_recent_sessions(workspace, limit)
     return sessions
 
 

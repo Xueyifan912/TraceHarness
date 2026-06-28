@@ -92,12 +92,14 @@ class StatusService:
         self.event_store = event_store or EventStore(self.workspace)
 
     def team_status(self) -> dict[str, Any]:
+        task_result = self.tasks()
         return {
             "active_teammates": self.active_teammates(),
             "pending_requests": self.pending_requests(),
-            "tasks": self.tasks()["tasks"],
+            "tasks": task_result["tasks"],
             "worktrees": self.worktrees()["worktrees"],
             "raw_text": self._raw_team_status(),
+            "warnings": task_result["warnings"],
         }
 
     def tasks(self) -> dict[str, Any]:
@@ -107,14 +109,22 @@ class StatusService:
             create_directory=True,
         )
         tasks: list[dict[str, Any]] = []
+        warnings: list[str] = []
         try:
             paths = sorted(tasks_dir.glob("task_*.json"))
-        except Exception:
+        except Exception as exc:
             paths = []
+            warnings.append(
+                f"Task directory could not be read: {type(exc).__name__}"
+            )
         for path in paths:
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
-            except Exception:
+            except Exception as exc:
+                warnings.append(
+                    f"Unreadable task state {path.name}: "
+                    f"{type(exc).__name__}"
+                )
                 continue
             if isinstance(data, dict):
                 tasks.append({
@@ -130,7 +140,10 @@ class StatusService:
                     ),
                     "worktree": data.get("worktree"),
                 })
-        return {"tasks": tasks}
+        return {
+            "tasks": tasks,
+            "warnings": warnings,
+        }
 
     def worktrees(self) -> dict[str, Any]:
         worktrees_dir = safe_runtime_path(

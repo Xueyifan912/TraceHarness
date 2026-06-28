@@ -1,6 +1,11 @@
 import threading
+from contextlib import nullcontext
 
 from .hooks import trigger_hooks
+from .runtime.cancellation import (
+    cancellation_context,
+    current_cancellation_event,
+)
 from .runtime.execution import (
     current_execution_context,
     execution_context,
@@ -69,22 +74,28 @@ def start_background_task(block, handlers: dict) -> str:
     captured_context = _captured_context()
     captured_execution = current_execution_context()
     captured_event = current_event_context()
+    captured_cancel_event = current_cancellation_event()
 
     def worker():
         status = "completed"
         error_type = None
-        with execution_context(
-            session_id=captured_execution.get("session_id"),
-            run_id=captured_execution.get("run_id"),
-            source=captured_execution.get("source"),
-            workspace=captured_execution.get("workspace"),
-            detached=captured_execution.get("detached"),
-        ), event_context(
-            session_id=captured_event.get("session_id"),
-            run_id=captured_event.get("run_id"),
-            source=captured_event.get("source"),
-            workspace=captured_event.get("workspace"),
-        ):
+        cancel_scope = (
+            cancellation_context(captured_cancel_event)
+            if captured_cancel_event is not None
+            else nullcontext()
+        )
+        with cancel_scope, execution_context(
+                session_id=captured_execution.get("session_id"),
+                run_id=captured_execution.get("run_id"),
+                source=captured_execution.get("source"),
+                workspace=captured_execution.get("workspace"),
+                detached=captured_execution.get("detached"),
+            ), event_context(
+                session_id=captured_event.get("session_id"),
+                run_id=captured_event.get("run_id"),
+                source=captured_event.get("source"),
+                workspace=captured_event.get("workspace"),
+            ):
             try:
                 handler = handlers.get(block.name)
                 result = call_tool_handler(handler, block.input, block.name)
@@ -98,7 +109,10 @@ def start_background_task(block, handlers: dict) -> str:
                 task = background_tasks.get(bg_id)
                 if task is None:
                     return
-                if task.get("abandoned"):
+                if task.get("abandoned") or (
+                    captured_cancel_event is not None
+                    and captured_cancel_event.is_set()
+                ):
                     background_tasks.pop(bg_id, None)
                     background_results.pop(bg_id, None)
                     background_condition.notify_all()
@@ -106,6 +120,7 @@ def start_background_task(block, handlers: dict) -> str:
                 payload = {
                     "background_id": bg_id,
                     "tool_use_id": block.id,
+                    "tool": block.name,
                     "status": status,
                 }
                 if error_type:
@@ -129,6 +144,10 @@ def start_background_task(block, handlers: dict) -> str:
             "abandoned": False,
         }
     thread = threading.Thread(target=worker, daemon=True)
+    with background_condition:
+        task = background_tasks.get(bg_id)
+        if task is not None:
+            task["thread"] = thread
     try:
         thread.start()
     except Exception:
@@ -191,8 +210,8 @@ def wait_for_background_task_update(timeout: float = 0.1) -> bool:
         return has_running()
 
 
-def abandon_background_tasks() -> None:
-    """Detach scoped background work after its owning run becomes terminal."""
+def abandon_background_tasks(*, wait: bool = False) -> None:
+    """Cancel delivery and optionally wait for scoped background work to exit."""
     current_context = _captured_context()
     with background_condition:
         for bg_id, task in list(background_tasks.items()):
@@ -204,4 +223,9 @@ def abandon_background_tasks() -> None:
                 background_tasks.pop(bg_id, None)
                 background_results.pop(bg_id, None)
         background_condition.notify_all()
+        while wait and any(
+            _matches_current_context(task, current_context)
+            for task in background_tasks.values()
+        ):
+            background_condition.wait(timeout=0.1)
 

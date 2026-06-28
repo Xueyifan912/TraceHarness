@@ -333,6 +333,72 @@ def test_teammate_final_handoff_includes_context(monkeypatch, tmp_path):
     }
 
 
+def test_teammate_read_handler_forwards_limit_and_offset(monkeypatch):
+    from coding_agent.providers.base import TextBlock, ToolUseBlock
+    from coding_agent import teams as teams_mod
+
+    captured = {}
+
+    def fake_read(path, limit=None, offset=0, cwd=None):
+        captured.update({
+            "path": path,
+            "limit": limit,
+            "offset": offset,
+            "cwd": cwd,
+        })
+        return "selected lines"
+
+    class FakeProvider:
+        name = "fake-provider"
+
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, **kwargs):
+            del kwargs
+            self.calls += 1
+            if self.calls == 1:
+                return SimpleNamespace(
+                    content=[ToolUseBlock(
+                        id="call_read",
+                        name="read_file",
+                        input={
+                            "path": "notes.txt",
+                            "limit": 5,
+                            "offset": 7,
+                        },
+                    )],
+                    stop_reason="tool_use",
+                )
+            return SimpleNamespace(
+                content=[TextBlock("done")],
+                stop_reason="end_turn",
+            )
+
+    monkeypatch.setattr(teams_mod, "BUS", FakeBus())
+    monkeypatch.setattr(teams_mod, "run_read", fake_read)
+    monkeypatch.setattr(
+        teams_mod,
+        "get_model_provider",
+        lambda: FakeProvider(),
+    )
+    monkeypatch.setattr(teams_mod, "IDLE_TIMEOUT", 0)
+    monkeypatch.setattr(teams_mod, "IDLE_POLL_INTERVAL", 1)
+
+    teams_mod.spawn_teammate_thread("reader", "reviewer", "read notes")
+    deadline = time.time() + 2
+    while time.time() < deadline and "reader" in teams_mod.active_teammates:
+        time.sleep(0.01)
+
+    assert "reader" not in teams_mod.active_teammates
+    assert captured == {
+        "path": "notes.txt",
+        "limit": 5,
+        "offset": 7,
+        "cwd": None,
+    }
+
+
 def test_worktree_name_validation_still_blocks_path_escape():
     from coding_agent.task_system.worktrees import (
         create_worktree,

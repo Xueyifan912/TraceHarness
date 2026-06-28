@@ -68,9 +68,11 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
+        agent_service.start_background_services()
         try:
             yield
         finally:
+            agent_service.shutdown()
             close_mcp_clients(agent_service.workspace)
 
     app = FastAPI(
@@ -349,8 +351,8 @@ def create_app(
     def resolve_approval(
         approval_id: str,
         request: ApprovalResolveRequest,
-        session_id: str | None = None,
-        run_id: str | None = None,
+        session_id: str = Query(...),
+        run_id: str = Query(...),
     ):
         return {
             "approval": agent_service.resolve_approval(

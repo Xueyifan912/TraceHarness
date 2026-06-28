@@ -258,6 +258,33 @@ def evaluate_tool_use(block: Any, policy: SecurityPolicy | None = None,
                 tool_use_id=tool_use_id,
             )
 
+    if tool == "remove_worktree":
+        name = str(tool_input.get("name", ""))
+        discard = bool(tool_input.get("discard_changes"))
+        return PolicyDecision(
+            action="ask",
+            tool=tool,
+            reason=(
+                "Removing a worktree can permanently delete uncommitted changes"
+                if discard
+                else "Removing a worktree and its branch requires confirmation"
+            ),
+            rule="worktree_removal",
+            subject=f"name={name}, discard_changes={discard}",
+            tool_use_id=tool_use_id,
+        )
+
+    if tool == "connect_mcp":
+        name = str(tool_input.get("name", ""))
+        return PolicyDecision(
+            action="ask",
+            tool=tool,
+            reason="Connecting an MCP server may start a workspace-configured process",
+            rule="mcp_process_start",
+            subject=name,
+            tool_use_id=tool_use_id,
+        )
+
     if tool.startswith("mcp__"):
         for pattern in active_policy.mcp_ask_name_patterns:
             if pattern and pattern in tool:

@@ -8,6 +8,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..background import abandon_background_tasks
+from ..cron_scheduler import (
+    cancel_session_jobs,
+    consume_web_cron_queue,
+    requeue_cron_job,
+)
 from ..memory.context import update_context
 from ..message_utils import is_internal_message, public_chat_messages
 from ..runtime.execution import execution_context
@@ -23,10 +28,9 @@ from ..runtime.session import (
     SessionRecord,
     archive_session,
     create_session,
-    list_recent_sessions,
     load_session,
+    scan_recent_sessions,
     save_session_snapshot,
-    session_dir,
     session_file_path,
 )
 from .approvals import ApprovalRegistry, PendingApproval, web_permission_context
@@ -263,6 +267,9 @@ class AgentService:
             workspace=self.workspace)
         self.approval_registry.workspace = self.workspace
         self.loop_factory = loop_factory
+        self._service_guard = threading.Lock()
+        self._service_stop = threading.Event()
+        self._cron_thread: threading.Thread | None = None
         for interrupted in self.registry.take_recovered_interrupts():
             self._log_run_event("run_status", interrupted)
             self._log_run_event("run_failed", interrupted)
@@ -275,10 +282,70 @@ class AgentService:
             "version": "0.1",
         }
 
+    def start_background_services(self) -> None:
+        with self._service_guard:
+            if self._cron_thread and self._cron_thread.is_alive():
+                return
+            self._service_stop.clear()
+            self._cron_thread = threading.Thread(
+                target=self._cron_dispatch_loop,
+                name=f"web-cron-{id(self):x}",
+                daemon=True,
+            )
+            self._cron_thread.start()
+
+    def shutdown(self) -> None:
+        self._service_stop.set()
+        with self._service_guard:
+            thread = self._cron_thread
+            self._cron_thread = None
+        if thread and thread.is_alive():
+            thread.join(timeout=2)
+
+    def _cron_dispatch_loop(self) -> None:
+        while not self._service_stop.wait(0.25):
+            self._dispatch_due_cron_jobs_once()
+
+    def _dispatch_due_cron_jobs_once(self) -> None:
+        for job in consume_web_cron_queue(self.workspace):
+            if not job.session_id:
+                continue
+            try:
+                self.start_run(
+                    job.session_id,
+                    f"[Scheduled] {job.prompt}",
+                )
+            except SessionRunning:
+                requeue_cron_job(job, self.workspace)
+            except (SessionNotFound, SessionCorrupt) as exc:
+                cancel_session_jobs(job.session_id, self.workspace)
+                with event_context(
+                    session_id=job.session_id,
+                    source="web_cron",
+                    workspace=self.workspace,
+                    clear_run_id=True,
+                ):
+                    log_event("cron_dispatch_failed", {
+                        "job_id": job.id,
+                        "error_type": type(exc).__name__,
+                    })
+            except Exception as exc:
+                requeue_cron_job(job, self.workspace)
+                with event_context(
+                    session_id=job.session_id,
+                    source="web_cron",
+                    workspace=self.workspace,
+                    clear_run_id=True,
+                ):
+                    log_event("cron_dispatch_failed", {
+                        "job_id": job.id,
+                        "error_type": type(exc).__name__,
+                    })
+
     def create_session(self, title: str | None = None,
                        initial_message: str | None = None) -> dict[str, Any]:
-        del title
-        record = create_session(self.workspace)
+        normalized_title = str(title or "").strip() or None
+        record = create_session(self.workspace, title=normalized_title)
         if not record.path.exists():
             raise PersistenceFailed(details={
                 "session_id": record.session_id,
@@ -301,13 +368,21 @@ class AgentService:
 
     def list_sessions(self, limit: int = 20) -> dict[str, Any]:
         sessions = []
-        for item in list_recent_sessions(self.workspace, limit=limit):
+        recent, warnings = scan_recent_sessions(
+            self.workspace,
+            limit=limit,
+        )
+        warnings.extend(self.registry.restore_warnings())
+        for item in recent:
             session_id = item.get("session_id")
             if not session_id:
                 continue
             snapshot = load_session(str(session_id), self.workspace) or item
             sessions.append(self._summary(snapshot))
-        return {"sessions": sessions}
+        return {
+            "sessions": sessions,
+            "warnings": warnings,
+        }
 
     def get_session(self, session_id: str) -> dict[str, Any]:
         snapshot = self._load_snapshot(session_id)
@@ -339,6 +414,7 @@ class AgentService:
             }) from exc
         if archived_path is None:
             raise SessionNotFound(details={"session_id": session_id})
+        cancel_session_jobs(session_id, self.workspace)
         self.registry.forget_session(session_id)
         self.approval_registry.forget_session(session_id)
         return {
@@ -408,9 +484,9 @@ class AgentService:
         return {"run": run.to_dict()}
 
     def cancel_run(self, session_id: str, run_id: str) -> dict[str, Any]:
-        self._load_snapshot(session_id)
         run = self.registry.request_cancel(session_id, run_id)
         if run is None:
+            self._load_snapshot(session_id)
             raise RunNotFound(details={
                 "session_id": session_id,
                 "run_id": run_id,
@@ -423,6 +499,7 @@ class AgentService:
                 source="web",
                 workspace=self.workspace,
             ):
+                self._log_run_event("run_status", run)
                 log_event("run_cancel_requested", {"run": run.to_dict()})
         return {"run": run.to_dict()}
 
@@ -486,6 +563,34 @@ class AgentService:
         messages.append({"role": "user", "content": prompt})
         display_messages.append({"role": "user", "content": prompt})
         assistant_messages: list[dict[str, Any]] = []
+        assistant_messages_captured = False
+
+        def capture_assistant_messages() -> None:
+            nonlocal assistant_messages, assistant_messages_captured
+            if assistant_messages_captured:
+                return
+            assistant_messages = _new_visible_assistant_messages(
+                messages,
+                existing_message_ids,
+            )
+            display_messages.extend(assistant_messages)
+            for message in assistant_messages:
+                log_event(
+                    "assistant_message",
+                    _assistant_message_payload(message),
+                )
+            assistant_messages_captured = True
+
+        def persist_transcript() -> bool:
+            if not save:
+                return True
+            record = self._record_from_snapshot(session_id, snapshot)
+            return save_session_snapshot(
+                record,
+                messages,
+                last_user_prompt=prompt,
+                display_messages=display_messages,
+            )
 
         with execution_context(
             session_id=session_id,
@@ -527,71 +632,54 @@ class AgentService:
                             "reason": getattr(outcome, "reason", "failed"),
                         },
                     )
-                assistant_messages = _new_visible_assistant_messages(
-                    messages,
-                    existing_message_ids,
-                )
-                display_messages.extend(assistant_messages)
-                for message in assistant_messages:
-                    log_event("assistant_message",
-                              _assistant_message_payload(message))
-                if save:
-                    record = self._record_from_snapshot(snapshot)
-                    if not save_session_snapshot(
-                        record,
-                        messages,
-                        last_user_prompt=prompt,
-                        display_messages=display_messages,
-                    ):
-                        raise PersistenceFailed(details={
-                            "session_id": session_id,
-                            "run_id": run.run_id,
-                        })
+                capture_assistant_messages()
+                if not persist_transcript():
+                    raise PersistenceFailed(details={
+                        "session_id": session_id,
+                        "run_id": run.run_id,
+                    })
                 completed = self.registry.complete(run.run_id)
                 self._log_run_event("run_status", completed)
                 self._log_run_event("run_completed", completed)
             except RunCancelled as exc:
                 self.approval_registry.cancel_run(run.run_id)
                 abandon_background_tasks()
-                assistant_messages = _new_visible_assistant_messages(
-                    messages,
-                    existing_message_ids,
-                )
-                display_messages.extend(assistant_messages)
-                for message in assistant_messages:
-                    log_event(
-                        "assistant_message",
-                        _assistant_message_payload(message),
+                capture_assistant_messages()
+                if not persist_transcript():
+                    failed = self.registry.fail(
+                        run.run_id,
+                        PersistenceFailed.message,
                     )
-                if save:
-                    record = self._record_from_snapshot(snapshot)
-                    if not save_session_snapshot(
-                        record,
-                        messages,
-                        last_user_prompt=prompt,
-                        display_messages=display_messages,
-                    ):
-                        failed = self.registry.fail(
-                            run.run_id,
-                            PersistenceFailed.message,
-                        )
-                        self._log_run_event("run_status", failed)
-                        self._log_run_event("run_failed", failed)
-                        if raise_errors:
-                            raise PersistenceFailed(details={
-                                "session_id": session_id,
-                                "run_id": run.run_id,
-                            })
-                        return None
+                    self._log_run_event("run_status", failed)
+                    self._log_run_event("run_failed", failed)
+                    if raise_errors:
+                        raise PersistenceFailed(details={
+                            "session_id": session_id,
+                            "run_id": run.run_id,
+                        })
+                    return None
                 cancelled = self.registry.cancel(run.run_id, str(exc))
                 self._log_run_event("run_status", cancelled)
                 self._log_run_event("run_cancelled", cancelled)
             except Exception as exc:
                 self.approval_registry.cancel_run(run.run_id)
                 abandon_background_tasks()
+                capture_assistant_messages()
+                persistence_ok = False
+                try:
+                    persistence_ok = persist_transcript()
+                except Exception:
+                    persistence_ok = False
+                error_text = scrub_sensitive_text(
+                    f"{type(exc).__name__}: {exc}"
+                )
+                if not persistence_ok:
+                    error_text = (
+                        f"{error_text}; {PersistenceFailed.message}"
+                    )
                 failed = self.registry.fail(
                     run.run_id,
-                    scrub_sensitive_text(f"{type(exc).__name__}: {exc}"),
+                    error_text,
                 )
                 self._log_run_event("run_status", failed)
                 self._log_run_event("run_failed", failed)
@@ -668,13 +756,23 @@ class AgentService:
             raise SessionNotFound(details={"session_id": session_id})
         return snapshot
 
-    def _record_from_snapshot(self, snapshot: dict[str, Any]) -> SessionRecord:
-        session_id = str(snapshot["session_id"])
+    def _record_from_snapshot(
+        self,
+        session_id: str,
+        snapshot: dict[str, Any],
+    ) -> SessionRecord:
+        if snapshot.get("session_id") != session_id:
+            raise SessionCorrupt(details={"session_id": session_id})
         return SessionRecord(
             session_id=session_id,
             created_at=str(snapshot.get("created_at") or ""),
             workspace_path=str(self.workspace),
-            path=session_dir(self.workspace) / f"{session_id}.json",
+            path=session_file_path(session_id, self.workspace),
+            title=(
+                str(snapshot["title"])
+                if snapshot.get("title") is not None
+                else None
+            ),
         )
 
     def _summary(self, snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -685,6 +783,7 @@ class AgentService:
             "created_at": snapshot.get("created_at"),
             "updated_at": snapshot.get("updated_at"),
             "workspace_path": snapshot.get("workspace_path") or str(self.workspace),
+            "title": snapshot.get("title"),
             "message_count": len(_display_messages(snapshot)),
             "last_user_prompt_preview": snapshot.get("last_user_prompt_preview"),
             "status": status,

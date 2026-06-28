@@ -36,6 +36,7 @@ function statusLabel(status: string): string {
     running: "运行中",
     queued: "排队",
     waiting_approval: "待审批",
+    cancelling: "停止中",
     completed: "已完成",
     failed: "失败",
     cancelled: "已取消"
@@ -86,7 +87,7 @@ export function SessionSidebar({
         <button
           className="secondary-action"
           type="button"
-          disabled={isArchiving || ["running", "queued", "waiting_approval"].includes(current.status)}
+          disabled={isArchiving || ["running", "queued", "waiting_approval", "cancelling"].includes(current.status)}
           onClick={() => onArchive(current.session_id)}
         >
           <Archive size={16} />

@@ -5,7 +5,15 @@ from ..mcp.client import connect_mcp, mcp_tool_entries
 from ..task_system.tasks import claim_task, complete_task, create_task, format_task_line, get_task_json, list_tasks
 from ..task_system.worktrees import create_worktree, keep_worktree, remove_worktree
 from ..teams import BUS, consume_lead_inbox, run_request_plan, run_request_shutdown, run_review_plan, spawn_teammate_thread, team_status
-from .basic import run_bash, run_edit, run_glob, run_read, run_todo_write, run_write
+from .basic import (
+    run_bash,
+    run_edit,
+    run_glob,
+    run_read,
+    run_todo_read,
+    run_todo_write,
+    run_write,
+)
 from .subagent import spawn_subagent
 
 # ── Lead Worktree Tools ──
@@ -145,6 +153,9 @@ BUILTIN_TOOLS = [
                                                    "enum": ["pending", "in_progress", "completed"]}},
                                     "required": ["content", "status"]}}},
                       "required": ["todos"]}},
+    {"name": "todo_read",
+     "description": "Read the durable task list for the current session.",
+     "input_schema": {"type": "object", "properties": {}, "required": []}},
     {"name": "task",
      "description": "Launch a focused subagent. Returns only its final summary.",
      "input_schema": {"type": "object",
@@ -267,7 +278,8 @@ BUILTIN_TOOLS = [
 BUILTIN_HANDLERS = {
     "bash": run_bash, "read_file": run_read, "write_file": run_write,
     "edit_file": run_edit, "glob": run_glob,
-    "todo_write": run_todo_write, "task": spawn_subagent,
+    "todo_write": run_todo_write, "todo_read": run_todo_read,
+    "task": spawn_subagent,
     "load_skill": load_skill,
     "memory_read": run_memory_read,
     "memory_append": run_memory_append,

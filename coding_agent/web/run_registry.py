@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 from collections import deque
 from dataclasses import asdict, dataclass
@@ -17,6 +18,7 @@ MAX_TERMINAL_RUNS = 500
 RUN_STATE_DIR = ".agent_runs"
 INTERRUPTED_RUN_ERROR = "Run interrupted by backend restart."
 TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+_SAFE_STATE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 def utc_timestamp() -> str:
@@ -60,6 +62,7 @@ class SessionRunRegistry:
         self._terminal_run_ids: deque[str] = deque()
         self._interrupted_sessions: dict[str, str] = {}
         self._recovered_interrupts: list[RunState] = []
+        self._restore_warnings: list[str] = []
         self.workspace = (
             Path(workspace).resolve()
             if workspace is not None
@@ -99,6 +102,8 @@ class SessionRunRegistry:
                 event = self._cancel_events.get(run_id)
                 if event is not None:
                     event.set()
+                run.status = "cancelling"
+                self._persist_run_locked(run)
             return run
 
     def complete(self, run_id: str) -> RunState:
@@ -158,6 +163,10 @@ class SessionRunRegistry:
             recovered = list(self._recovered_interrupts)
             self._recovered_interrupts.clear()
             return recovered
+
+    def restore_warnings(self) -> list[str]:
+        with self._guard:
+            return list(self._restore_warnings)
 
     def forget_session(self, session_id: str) -> None:
         with self._guard:
@@ -255,15 +264,25 @@ class SessionRunRegistry:
                 directory.glob("run_*.json"),
                 key=lambda path: path.stat().st_mtime,
             )[-MAX_TERMINAL_RUNS:]
-        except Exception:
+        except Exception as exc:
+            self._restore_warnings.append(
+                f"Run state directory could not be read: "
+                f"{type(exc).__name__}"
+            )
             return
 
         for path in paths:
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
+                run_id = str(data["run_id"])
+                session_id = str(data["session_id"])
+                if run_id != path.stem or not _SAFE_STATE_ID.fullmatch(run_id):
+                    raise ValueError("run id does not match its file name")
+                if not session_id or not _SAFE_STATE_ID.fullmatch(session_id):
+                    raise ValueError("invalid session id")
                 run = RunState(
-                    run_id=str(data["run_id"]),
-                    session_id=str(data["session_id"]),
+                    run_id=run_id,
+                    session_id=session_id,
                     status=str(data["status"]),
                     started_at=str(data["started_at"]),
                     ended_at=(
@@ -282,7 +301,11 @@ class SessionRunRegistry:
                         else None
                     ),
                 )
-            except Exception:
+            except Exception as exc:
+                self._restore_warnings.append(
+                    f"Unreadable run state {path.name}: "
+                    f"{type(exc).__name__}"
+                )
                 continue
 
             if run.status not in TERMINAL_STATUSES:

@@ -515,8 +515,17 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
             p = wt_ctx["path"]
             return Path(p) if p else None
 
-        def _run_read(path: str) -> str:
-            return run_read(path, cwd=_wt_cwd())
+        def _run_read(
+            path: str,
+            limit: int | None = None,
+            offset: int = 0,
+        ) -> str:
+            return run_read(
+                path,
+                limit=limit,
+                offset=offset,
+                cwd=_wt_cwd(),
+            )
 
         def _run_write(path: str, content: str) -> str:
             return run_write(path, content, cwd=_wt_cwd())

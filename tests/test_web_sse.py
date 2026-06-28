@@ -382,6 +382,7 @@ def test_approval_events_are_observable_for_background_run(monkeypatch, tmp_path
 
     resolved = client.post(
         f"/api/approvals/{approval['approval_id']}",
+        params={"session_id": session_id, "run_id": run_id},
         json={"decision": "deny", "message": "blocked in sse test"},
     )
     assert resolved.status_code == 200

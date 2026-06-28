@@ -229,3 +229,54 @@ def test_event_store_limit_returns_bounded_recent_events(tmp_path):
     events = EventStore(tmp_path).read_events(limit=3)["events"]
 
     assert [event["payload"]["index"] for event in events] == [7, 8, 9]
+
+
+def test_event_store_warns_when_cursor_replay_exceeds_limit(tmp_path):
+    from coding_agent.runtime.events import event_context, log_event
+    from coding_agent.web.event_store import EventStore
+
+    with event_context(session_id="session_1", source="web", workspace=tmp_path):
+        for index in range(6):
+            log_event("numbered", {"index": index})
+
+    store = EventStore(tmp_path)
+    all_events = store.read_events(limit=10)["events"]
+    result = store.read_events(
+        limit=2,
+        cursor=all_events[0]["event_id"],
+    )
+
+    assert [event["payload"]["index"] for event in result["events"]] == [4, 5]
+    assert result["warnings"] == [
+        "More events exist after the requested cursor than "
+        "the replay limit allows; a full state resync is required."
+    ]
+
+
+def test_background_completion_finishes_existing_tool_timeline_item():
+    from coding_agent.web.event_store import build_timeline
+
+    timeline = build_timeline([
+        {
+            "event_id": "1",
+            "ts": "2026-01-01T00:00:00Z",
+            "type": "tool_call_started",
+            "payload": {"tool": "bash", "tool_use_id": "toolu_bg"},
+        },
+        {
+            "event_id": "2",
+            "ts": "2026-01-01T00:00:01Z",
+            "type": "background_completion",
+            "payload": {
+                "background_id": "bg_0001",
+                "tool": "bash",
+                "tool_use_id": "toolu_bg",
+                "status": "completed",
+            },
+        },
+    ])
+
+    assert len(timeline) == 1
+    assert timeline[0]["status"] == "completed"
+    assert timeline[0]["background_id"] == "bg_0001"
+    assert timeline[0]["ended_at"] == "2026-01-01T00:00:01Z"

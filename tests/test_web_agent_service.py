@@ -1,5 +1,7 @@
 import json
 import os
+import threading
+import time
 
 import pytest
 
@@ -183,7 +185,92 @@ def test_agent_service_marks_provider_failure_as_failed(monkeypatch, tmp_path):
     run = next(iter(service.registry._runs.values()))
     assert run.status == "failed"
     assert "provider exploded" in (run.error or "")
-    assert service.get_session(session_id)["messages"] == []
+    messages = service.get_session(session_id)["messages"]
+    assert [message["role"] for message in messages] == ["user", "assistant"]
+    assert messages[0]["content"] == "trigger provider failure"
+    assert "provider exploded" in messages[1]["content"][0]["text"]
+
+
+def test_session_listing_reports_corrupt_session_and_run_state(tmp_path):
+    from coding_agent.web.agent_service import AgentService
+
+    sessions_dir = tmp_path / ".agent_sessions"
+    sessions_dir.mkdir()
+    (sessions_dir / "broken.json").write_text(
+        "{not-json",
+        encoding="utf-8",
+    )
+    runs_dir = tmp_path / ".agent_runs"
+    runs_dir.mkdir()
+    (runs_dir / "run_broken.json").write_text(
+        json.dumps({
+            "run_id": "../outside",
+            "session_id": "session_1",
+            "status": "completed",
+            "started_at": "2026-01-01T00:00:00Z",
+        }),
+        encoding="utf-8",
+    )
+
+    result = AgentService(workspace=tmp_path).list_sessions()
+
+    assert result["sessions"] == []
+    assert len(result["warnings"]) == 2
+    assert any("broken.json" in warning for warning in result["warnings"])
+    assert any("run_broken.json" in warning for warning in result["warnings"])
+    assert not (tmp_path.parent / "outside.json").exists()
+
+
+def test_web_background_service_dispatches_queued_cron_prompt(tmp_path):
+    from coding_agent.cron_scheduler import CronJob, requeue_cron_job
+    from coding_agent.runtime.session import load_session
+    from coding_agent.web.agent_service import AgentService
+
+    completed = threading.Event()
+
+    class CronLoop:
+        def run(self, messages, context):
+            del context
+            messages.append({
+                "role": "assistant",
+                "content": [{"type": "text", "text": "scheduled response"}],
+            })
+            completed.set()
+
+    service = AgentService(workspace=tmp_path, loop_factory=CronLoop)
+    session_id = service.create_session()["session"]["session_id"]
+    requeue_cron_job(
+        CronJob(
+            id="cron_web",
+            cron="* * * * *",
+            prompt="inspect scheduled state",
+            recurring=False,
+            durable=False,
+            session_id=session_id,
+        ),
+        tmp_path,
+    )
+
+    service.start_background_services()
+    try:
+        assert completed.wait(timeout=3)
+        deadline = time.time() + 3
+        snapshot = {}
+        while time.time() < deadline:
+            snapshot = load_session(session_id, tmp_path) or {}
+            if len(snapshot.get("messages", [])) == 2:
+                break
+            time.sleep(0.01)
+    finally:
+        service.shutdown()
+
+    assert len(snapshot["messages"]) == 2
+    assert snapshot["messages"][0]["content"] == (
+        "[Scheduled] inspect scheduled state"
+    )
+    assert snapshot["messages"][1]["content"][0]["text"] == (
+        "scheduled response"
+    )
 
 
 def test_agent_service_scrubs_secrets_from_event_and_title_previews(tmp_path):

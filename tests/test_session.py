@@ -82,6 +82,43 @@ def test_load_session_rejects_path_separators(tmp_path):
     assert load_session("nested\\session", tmp_path) is None
 
 
+def test_load_session_rejects_tampered_internal_session_id(tmp_path):
+    from coding_agent.runtime.session import create_session, load_session
+
+    record = create_session(tmp_path)
+    payload = json.loads(record.path.read_text(encoding="utf-8"))
+    payload["session_id"] = "../outside"
+    record.path.write_text(
+        json.dumps(payload, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    assert load_session(record.session_id, tmp_path) is None
+    assert not (tmp_path.parent / "outside.json").exists()
+
+
+def test_scan_recent_sessions_reports_corrupt_and_mismatched_records(tmp_path):
+    from coding_agent.runtime.session import (
+        create_session,
+        scan_recent_sessions,
+    )
+
+    valid = create_session(tmp_path)
+    session_dir = tmp_path / ".agent_sessions"
+    (session_dir / "broken.json").write_text("{not-json", encoding="utf-8")
+    (session_dir / "mismatch.json").write_text(
+        json.dumps({"session_id": "different"}),
+        encoding="utf-8",
+    )
+
+    sessions, warnings = scan_recent_sessions(tmp_path)
+
+    assert [item["session_id"] for item in sessions] == [valid.session_id]
+    assert len(warnings) == 2
+    assert any("broken.json" in warning for warning in warnings)
+    assert any("mismatch.json" in warning for warning in warnings)
+
+
 def test_safe_manual_session_id_can_load(tmp_path):
     from coding_agent.runtime.session import (
         SessionRecord,

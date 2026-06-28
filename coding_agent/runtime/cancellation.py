@@ -32,6 +32,11 @@ def cancellation_requested() -> bool:
     return bool(event and event.is_set())
 
 
+def current_cancellation_event() -> threading.Event | None:
+    """Return the cancellation event bound to the current execution scope."""
+    return _CANCEL_EVENT.get()
+
+
 def raise_if_cancelled() -> None:
     if cancellation_requested():
         raise RunCancelled("Run cancelled by user.")

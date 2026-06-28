@@ -130,4 +130,39 @@ describe("useRunEvents", () => {
     expect(result.current.status).toBe("completed");
     expect(second.closed).toBe(true);
   });
+
+  it("subscribes to background completion without closing the run stream", () => {
+    const onEvent = vi.fn();
+    const onCompleted = vi.fn();
+    const { result } = renderHook(() =>
+      useRunEvents({
+        sessionId: "session_bg",
+        runId: "run_bg",
+        enabled: true,
+        onEvent,
+        onCompleted
+      })
+    );
+    const source = MockEventSource.instances[0];
+    const completion = event(
+      "background_completion",
+      "session_bg",
+      "run_bg",
+      {
+        background_id: "bg_0001",
+        tool_use_id: "toolu_bg",
+        status: "completed"
+      }
+    );
+
+    act(() => {
+      source.onopen?.();
+      source.emit(completion);
+    });
+
+    expect(onEvent).toHaveBeenCalledWith(completion);
+    expect(onCompleted).not.toHaveBeenCalled();
+    expect(result.current.status).toBe("connected");
+    expect(source.closed).toBe(false);
+  });
 });

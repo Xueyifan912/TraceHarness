@@ -125,6 +125,10 @@ def test_web_policy_ask_creates_pending_and_allow_continues_tool(
 
     resolved = client.post(
         f"/api/approvals/{approval['approval_id']}",
+        params={
+            "session_id": approval["session_id"],
+            "run_id": approval["run_id"],
+        },
         json={"decision": "allow", "message": "approved by test"},
     )
     assert resolved.status_code == 200
@@ -159,6 +163,10 @@ def test_web_policy_deny_returns_tool_result_without_crash(monkeypatch, tmp_path
     approval = _wait_for_pending(client)[0]
     denied = client.post(
         f"/api/approvals/{approval['approval_id']}",
+        params={
+            "session_id": approval["session_id"],
+            "run_id": approval["run_id"],
+        },
         json={"decision": "deny", "message": "not allowed"},
     )
     assert denied.status_code == 200
@@ -198,8 +206,19 @@ def test_approval_api_errors(monkeypatch, tmp_path):
     assert missing.status_code == 404
     assert missing.json()["error"]["code"] == "approval_not_found"
 
+    missing_context = client.post(
+        f"/api/approvals/{approval['approval_id']}",
+        json={"decision": "allow"},
+    )
+    assert missing_context.status_code == 422
+    assert missing_context.json()["error"]["code"] == "validation_error"
+
     invalid = client.post(
         f"/api/approvals/{approval['approval_id']}",
+        params={
+            "session_id": approval["session_id"],
+            "run_id": approval["run_id"],
+        },
         json={"decision": "maybe"},
     )
     assert invalid.status_code == 422
@@ -207,6 +226,10 @@ def test_approval_api_errors(monkeypatch, tmp_path):
 
     too_long = client.post(
         f"/api/approvals/{approval['approval_id']}",
+        params={
+            "session_id": approval["session_id"],
+            "run_id": approval["run_id"],
+        },
         json={"decision": "deny", "message": "x" * 2001},
     )
     assert too_long.status_code == 422
@@ -214,7 +237,10 @@ def test_approval_api_errors(monkeypatch, tmp_path):
 
     mismatch = client.post(
         f"/api/approvals/{approval['approval_id']}",
-        params={"session_id": "different-session"},
+        params={
+            "session_id": "different-session",
+            "run_id": approval["run_id"],
+        },
         json={"decision": "allow"},
     )
     assert mismatch.status_code == 409
@@ -222,12 +248,20 @@ def test_approval_api_errors(monkeypatch, tmp_path):
 
     ok = client.post(
         f"/api/approvals/{approval['approval_id']}",
+        params={
+            "session_id": approval["session_id"],
+            "run_id": approval["run_id"],
+        },
         json={"decision": "deny"},
     )
     assert ok.status_code == 200
 
     again = client.post(
         f"/api/approvals/{approval['approval_id']}",
+        params={
+            "session_id": approval["session_id"],
+            "run_id": approval["run_id"],
+        },
         json={"decision": "allow"},
     )
     assert again.status_code == 409
@@ -259,6 +293,10 @@ def test_pending_approvals_do_not_cross_sessions(monkeypatch, tmp_path):
     for approval in approvals:
         response = client.post(
             f"/api/approvals/{approval['approval_id']}",
+            params={
+                "session_id": approval["session_id"],
+                "run_id": approval["run_id"],
+            },
             json={"decision": "deny", "message": f"deny {approval['session_id']}"},
         )
         assert response.status_code == 200

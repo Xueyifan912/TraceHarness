@@ -41,6 +41,46 @@ def _events(client, session_id, run_id):
     return response.json()["events"]
 
 
+def test_abandon_background_tasks_defaults_to_nonblocking(tmp_path):
+    from coding_agent import background as background_mod
+    from coding_agent.runtime.events import event_context
+    from coding_agent.runtime.execution import execution_context
+
+    workspace = str(tmp_path.resolve())
+    context = {
+        "session_id": "session_nonblocking",
+        "run_id": "run_nonblocking",
+        "workspace": workspace,
+    }
+
+    with background_mod.background_condition:
+        background_mod.background_tasks.clear()
+        background_mod.background_results.clear()
+        background_mod.background_tasks["bg_nonblocking"] = {
+            "tool_use_id": "toolu_nonblocking",
+            "command": "blocked background tool",
+            "status": "running",
+            "context": context,
+            "session_id": context["session_id"],
+            "run_id": context["run_id"],
+            "workspace": workspace,
+            "abandoned": False,
+        }
+
+    try:
+        with execution_context(**context), event_context(**context):
+            started = time.monotonic()
+            background_mod.abandon_background_tasks()
+            elapsed = time.monotonic() - started
+
+        assert elapsed < 0.2
+        assert background_mod.background_tasks["bg_nonblocking"]["abandoned"]
+    finally:
+        with background_mod.background_condition:
+            background_mod.background_tasks.clear()
+            background_mod.background_results.clear()
+
+
 def _actual_loop_client(
     monkeypatch,
     tmp_path,
@@ -239,10 +279,15 @@ def test_cancel_during_tool_keeps_run_active_until_worker_exits(
         f"/api/sessions/{session_id}/runs/{run_id}/cancel"
     )
     assert cancel_response.status_code == 200
-    assert cancel_response.json()["run"]["status"] == "running"
+    assert cancel_response.json()["run"]["status"] == "cancelling"
     assert client.get(
         f"/api/sessions/{session_id}"
     ).json()["session"]["active_run_id"] == run_id
+    blocked = client.post(
+        f"/api/sessions/{session_id}/runs",
+        json={"content": "must wait for cancellation"},
+    )
+    assert blocked.status_code == 409
 
     release_tool.set()
     cancelled = _wait_for_run(
@@ -254,6 +299,61 @@ def test_cancel_during_tool_keeps_run_active_until_worker_exits(
     ]
     assert "run_cancel_requested" in event_types
     assert event_types[-1] == "run_cancelled"
+
+
+def test_cancel_active_run_even_when_session_snapshot_is_corrupt(
+    monkeypatch,
+    tmp_path,
+):
+    from coding_agent.runtime.session import session_file_path
+
+    tool_started = threading.Event()
+    release_tool = threading.Event()
+
+    def handler(path):
+        del path
+        tool_started.set()
+        assert release_tool.wait(timeout=5)
+        return "tool stopped"
+
+    client, service = _actual_loop_client(
+        monkeypatch,
+        tmp_path,
+        handler=handler,
+    )
+    session_id = client.post(
+        "/api/sessions", json={}
+    ).json()["session"]["session_id"]
+    run = client.post(
+        f"/api/sessions/{session_id}/runs",
+        json={"content": "cancel after snapshot corruption"},
+    ).json()["run"]
+    run_id = run["run_id"]
+    assert tool_started.wait(timeout=5)
+
+    session_file_path(session_id, tmp_path).write_text(
+        "{not-json",
+        encoding="utf-8",
+    )
+
+    cancel_response = client.post(
+        f"/api/sessions/{session_id}/runs/{run_id}/cancel"
+    )
+    assert cancel_response.status_code == 200
+    assert cancel_response.json()["run"]["status"] == "cancelling"
+    assert service.registry.get_run(run_id).status == "cancelling"
+
+    release_tool.set()
+    deadline = time.time() + 5
+    while time.time() < deadline:
+        cancelled = service.registry.get_run(run_id)
+        if cancelled.status == "cancelled":
+            break
+        time.sleep(0.01)
+    else:
+        raise AssertionError("run did not reach cancelled")
+
+    assert cancelled.error == "Run cancelled by user."
 
 
 def test_background_tool_belongs_to_run_until_result_is_consumed(
@@ -441,16 +541,21 @@ def test_cancelled_background_tool_does_not_leak_late_run_events(
     assert tool_started.wait(timeout=5)
     assert wait_turn_started.wait(timeout=5)
 
-    client.post(f"/api/sessions/{session_id}/runs/{run_id}/cancel")
-    cancelled = _wait_for_run(
-        client, session_id, run_id, "cancelled"
+    cancel_response = client.post(
+        f"/api/sessions/{session_id}/runs/{run_id}/cancel"
     )
+    assert cancel_response.json()["run"]["status"] == "cancelling"
+    assert client.get(
+        f"/api/sessions/{session_id}"
+    ).json()["session"]["active_run_id"] == run_id
+
+    release_tool.set()
+    cancelled = _wait_for_run(client, session_id, run_id, "cancelled")
     assert cancelled["error"] == "Run cancelled by user."
     assert [
         event["type"] for event in _events(client, session_id, run_id)
     ][-1] == "run_cancelled"
 
-    release_tool.set()
     deadline = time.time() + 5
     while time.time() < deadline and background_mod.background_tasks:
         time.sleep(0.01)

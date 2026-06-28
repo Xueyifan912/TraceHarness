@@ -3,6 +3,7 @@ export type RunStatus =
   | "queued"
   | "running"
   | "waiting_approval"
+  | "cancelling"
   | "completed"
   | "failed"
   | "cancelled";
@@ -22,6 +23,7 @@ export interface HealthResponse {
 
 export interface SessionSummary {
   session_id: string;
+  title?: string | null;
   created_at: string | null;
   updated_at: string | null;
   workspace_path: string | null;
@@ -59,6 +61,7 @@ export interface SessionCreateResponse {
 
 export interface SessionListResponse {
   sessions: SessionSummary[];
+  warnings?: string[];
 }
 
 export interface SessionDetailResponse {
@@ -133,6 +136,7 @@ export type RunEventType =
   | "llm_call_failed"
   | "tool_call_started"
   | "tool_call_ended"
+  | "background_completion"
   | "permission_decision"
   | "approval_requested"
   | "approval_resolved"
@@ -210,10 +214,12 @@ export interface TeamStatusResponse {
   tasks: TaskItem[];
   worktrees: WorktreeItem[];
   raw_text: string;
+  warnings?: string[];
 }
 
 export interface TasksResponse {
   tasks: TaskItem[];
+  warnings?: string[];
 }
 
 export interface WorktreesResponse {

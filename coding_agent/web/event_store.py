@@ -139,6 +139,11 @@ class EventStore:
                 )
             else:
                 events = events[cursor_index + 1:]
+                if bounded_limit and len(events) > bounded_limit:
+                    warnings.append(
+                        "More events exist after the requested cursor than "
+                        "the replay limit allows; a full state resync is required."
+                    )
 
         selected = events[-bounded_limit:] if bounded_limit else []
         return {
@@ -236,6 +241,27 @@ def build_timeline(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 item["output_preview"] = payload.get("output_preview")
             if "output_length" in payload:
                 item["output_length"] = payload.get("output_length")
+            continue
+
+        if event_type == "background_completion":
+            key = str(
+                payload.get("tool_use_id")
+                or payload.get("background_id")
+                or event_id
+            )
+            item = tool_items.get(key)
+            if item is None:
+                item = {
+                    "id": f"tool_{key}",
+                    "type": "tool_call",
+                    "title": payload.get("tool") or "background tool",
+                    "tool_use_id": payload.get("tool_use_id"),
+                }
+                tool_items[key] = item
+                items.append(item)
+            item["status"] = payload.get("status") or "completed"
+            item["ended_at"] = timestamp
+            item["background_id"] = payload.get("background_id")
             continue
 
         if event_type == "llm_call_started":

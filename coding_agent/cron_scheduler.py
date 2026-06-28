@@ -271,6 +271,49 @@ def consume_cron_queue() -> list[CronJob]:
     return fired
 
 
+def consume_web_cron_queue(
+    workspace: str | Path,
+) -> list[CronJob]:
+    """Take due jobs owned by Web sessions in one workspace."""
+    _, _, queue, _ = _workspace_state(workspace)
+    with cron_lock:
+        fired = [job for job in queue if job.session_id is not None]
+        queue[:] = [job for job in queue if job.session_id is None]
+    return fired
+
+
+def requeue_cron_job(
+    job: CronJob,
+    workspace: str | Path,
+) -> None:
+    _, _, queue, _ = _workspace_state(workspace)
+    with cron_lock:
+        if not any(queued.id == job.id for queued in queue):
+            queue.append(job)
+
+
+def cancel_session_jobs(
+    session_id: str,
+    workspace: str | Path,
+) -> int:
+    root, jobs, queue, last_fired = _workspace_state(workspace)
+    with cron_lock:
+        removed = [
+            job for job in jobs.values()
+            if job.session_id == session_id
+        ]
+        for job in removed:
+            jobs.pop(job.id, None)
+            last_fired.pop(job.id, None)
+        queue[:] = [
+            job for job in queue
+            if job.session_id != session_id
+        ]
+    if any(job.durable for job in removed):
+        save_durable_jobs(root)
+    return len(removed)
+
+
 def run_schedule_cron(cron: str, prompt: str,
                       recurring: bool = True, durable: bool = True) -> str:
     result = schedule_job(cron, prompt, recurring, durable)

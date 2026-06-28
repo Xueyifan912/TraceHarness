@@ -74,10 +74,11 @@ export const apiClient = {
     return requestJson<SessionListResponse>(`/api/sessions?limit=${limit}`);
   },
 
-  createSession(initialMessage = ""): Promise<SessionCreateResponse> {
+  createSession(initialMessage = "", title: string | null = null): Promise<SessionCreateResponse> {
     return requestJson<SessionCreateResponse>("/api/sessions", {
       method: "POST",
       body: JSON.stringify({
+        title,
         initial_message: initialMessage || null
       })
     });
@@ -106,7 +107,11 @@ export const apiClient = {
     });
   },
 
-  startRun(sessionId: string, content: string, options: Record<string, unknown> = {}): Promise<RunStartResponse> {
+  startRun(
+    sessionId: string,
+    content: string,
+    options: { save?: boolean } = {}
+  ): Promise<RunStartResponse> {
     return requestJson<RunStartResponse>(`/api/sessions/${encodeURIComponent(sessionId)}/runs`, {
       method: "POST",
       body: JSON.stringify({
@@ -215,15 +220,11 @@ export const apiClient = {
   resolveApproval(
     approvalId: string,
     body: { decision: ApprovalDecision; message?: string },
-    params: { session_id?: string | null; run_id?: string | null } = {}
+    params: { session_id: string; run_id: string }
   ): Promise<ApprovalResolveResponse> {
     const query = new URLSearchParams();
-    if (params.session_id) {
-      query.set("session_id", params.session_id);
-    }
-    if (params.run_id) {
-      query.set("run_id", params.run_id);
-    }
+    query.set("session_id", params.session_id);
+    query.set("run_id", params.run_id);
     const suffix = query.toString() ? `?${query.toString()}` : "";
     return requestJson<ApprovalResolveResponse>(`/api/approvals/${encodeURIComponent(approvalId)}${suffix}`, {
       method: "POST",

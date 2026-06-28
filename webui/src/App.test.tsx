@@ -45,6 +45,7 @@ const mockState = vi.hoisted(() => {
   };
   return {
     approvalResolved: false,
+    failIdleLoad: false,
     session,
     idleSession,
     approval
@@ -62,14 +63,23 @@ vi.mock("./api/client", () => ({
     listSessions: vi.fn(async () => ({
       sessions: [mockState.session, mockState.idleSession]
     })),
-    getSession: vi.fn(async (sessionId: string) => ({
-      session:
-        sessionId === mockState.idleSession.session_id
-          ? mockState.idleSession
-          : mockState.session,
-      messages: [],
-      display_messages: []
-    })),
+    getSession: vi.fn(async (sessionId: string) => {
+      if (
+        sessionId === mockState.idleSession.session_id &&
+        mockState.failIdleLoad
+      ) {
+        throw new Error("idle session load failed");
+      }
+      const isIdle = sessionId === mockState.idleSession.session_id;
+      const messages = isIdle
+        ? []
+        : [{ role: "user", content: "old session transcript" }];
+      return {
+        session: isIdle ? mockState.idleSession : mockState.session,
+        messages,
+        display_messages: messages
+      };
+    }),
     getRun: vi.fn(async () => ({
       run: {
         run_id: "run_approval",
@@ -141,6 +151,7 @@ import App from "./App";
 describe("approval run state", () => {
   beforeEach(() => {
     mockState.approvalResolved = false;
+    mockState.failIdleLoad = false;
     vi.clearAllMocks();
   });
 
@@ -210,5 +221,21 @@ describe("approval run state", () => {
     await screen.findByRole("dialog", {
       name: "本地工具权限审批"
     });
+  });
+
+  it("clears the old transcript when the next session fails to load", async () => {
+    mockState.failIdleLoad = true;
+
+    render(<App />);
+
+    await screen.findByText("old session transcript");
+    fireEvent.click(
+      screen.getByRole("button", { name: /第二会话/ })
+    );
+
+    await waitFor(() =>
+      expect(screen.queryByText("old session transcript")).not.toBeInTheDocument()
+    );
+    expect(screen.getByText("idle session load failed")).toBeInTheDocument();
   });
 });

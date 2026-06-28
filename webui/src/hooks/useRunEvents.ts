@@ -12,6 +12,7 @@ const RUN_EVENT_TYPES = [
   "llm_call_failed",
   "tool_call_started",
   "tool_call_ended",
+  "background_completion",
   "permission_decision",
   "approval_requested",
   "approval_resolved",
