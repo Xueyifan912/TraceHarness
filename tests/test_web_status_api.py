@@ -120,6 +120,55 @@ def test_team_status_prioritizes_structured_state(monkeypatch, tmp_path):
     assert isinstance(payload["raw_text"], str)
 
 
+def test_team_status_filters_process_global_state_by_workspace(tmp_path):
+    from coding_agent import teams as teams_mod
+    from coding_agent.runtime.execution import execution_context
+
+    workspace_a = tmp_path / "workspace-a"
+    workspace_b = tmp_path / "workspace-b"
+    workspace_a.mkdir()
+    workspace_b.mkdir()
+    client_a = _client(workspace_a)
+    client_b = _client(workspace_b)
+    original_teammates = dict(teams_mod.active_teammates)
+    original_pending = dict(teams_mod.pending_requests)
+    teams_mod.active_teammates.clear()
+    teams_mod.pending_requests.clear()
+    try:
+        teams_mod.active_teammates["worker-a"] = {
+            "role": "implementer",
+            "status": "working",
+            "workspace": str(workspace_a.resolve()),
+        }
+        teams_mod.pending_requests["req_a"] = teams_mod.ProtocolState(
+            request_id="req_a",
+            type="plan_approval",
+            sender="worker-a",
+            target="lead",
+            status="pending",
+            payload="Plan A",
+            workspace=str(workspace_a.resolve()),
+        )
+
+        payload_a = client_a.get("/api/team/status").json()
+        payload_b = client_b.get("/api/team/status").json()
+        with execution_context(workspace=workspace_b):
+            review_result = teams_mod.run_review_plan("req_a", True)
+    finally:
+        teams_mod.active_teammates.clear()
+        teams_mod.active_teammates.update(original_teammates)
+        teams_mod.pending_requests.clear()
+        teams_mod.pending_requests.update(original_pending)
+
+    assert payload_a["active_teammates"][0]["name"] == "worker-a"
+    assert payload_a["pending_requests"][0]["request_id"] == "req_a"
+    assert payload_b["active_teammates"] == []
+    assert payload_b["pending_requests"] == []
+    assert "worker-a" not in payload_b["raw_text"]
+    assert "req_a" not in payload_b["raw_text"]
+    assert review_result == "Request req_a not found"
+
+
 def test_mcp_status_splits_mock_configured_connected_and_errors(tmp_path):
     from coding_agent.mcp import client as mcp_client_mod
     from coding_agent.runtime.events import log_event

@@ -73,6 +73,26 @@ describe("useApprovals", () => {
     mockState.reset();
   });
 
+  it("clears loading when the session changes while a poll is in flight", async () => {
+    const { result, rerender } = renderHook(
+      ({ sessionId }: { sessionId: string | null }) =>
+        useApprovals(sessionId, 60_000),
+      { initialProps: { sessionId: "session_test" as string | null } }
+    );
+    await waitFor(() => expect(mockState.listCalls).toBe(1));
+    await waitFor(() => expect(result.current.isLoading).toBe(true));
+
+    rerender({ sessionId: null });
+
+    expect(result.current.isLoading).toBe(false);
+    await act(async () => {
+      mockState.resolveStale(approval);
+      await mockState.stalePromise;
+    });
+    expect(result.current.approvals).toEqual([]);
+    expect(result.current.isLoading).toBe(false);
+  });
+
   it("ignores a stale poll that resolves after an approval decision", async () => {
     const { result } = renderHook(() =>
       useApprovals("session_test", 60_000)

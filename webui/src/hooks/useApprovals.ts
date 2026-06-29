@@ -41,9 +41,11 @@ export function useApprovals(sessionId: string | null, intervalMs = 1500) {
     mutationInFlightRef.current = false;
     setApprovals([]);
     setLastResolvedApproval(null);
+    setIsLoading(false);
     setIsResolving(false);
     setResolvingApprovalId(null);
     setError(null);
+    refreshRef.current = null;
   }, [sessionId]);
 
   const refresh = useCallback(async () => {

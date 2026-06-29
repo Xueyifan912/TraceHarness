@@ -91,6 +91,14 @@ class StatusService:
         self.workspace = (Path.cwd() if workspace is None else Path(workspace)).resolve()
         self.event_store = event_store or EventStore(self.workspace)
 
+    def _matches_workspace(self, workspace: Any) -> bool:
+        if workspace in (None, ""):
+            return True
+        try:
+            return Path(str(workspace)).resolve() == self.workspace
+        except Exception:
+            return False
+
     def team_status(self) -> dict[str, Any]:
         task_result = self.tasks()
         return {
@@ -316,6 +324,8 @@ class StatusService:
             item = _jsonable(info)
             if not isinstance(item, dict):
                 item = {}
+            if not self._matches_workspace(item.get("workspace")):
+                continue
             item.setdefault("name", name)
             teammates.append(item)
         return teammates
@@ -326,6 +336,8 @@ class StatusService:
             item = _jsonable(request)
             if not isinstance(item, dict):
                 item = {"request_id": request_id}
+            if not self._matches_workspace(item.get("workspace")):
+                continue
             item.setdefault("request_id", request_id)
             requests.append(item)
         return requests

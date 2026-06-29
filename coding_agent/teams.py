@@ -221,9 +221,17 @@ class ProtocolState:
     status: str
     payload: str
     created_at: float = field(default_factory=time.time)
+    workspace: str | None = None
 
 
 pending_requests: dict[str, ProtocolState] = {}
+
+
+def _current_workspace_key() -> str | None:
+    workspace = current_execution_context().get("workspace")
+    if workspace is None:
+        return None
+    return str(Path(workspace).resolve())
 
 
 def active_teammates_snapshot() -> dict[str, dict]:
@@ -261,6 +269,21 @@ def _update_active_teammate(name: str, **updates):
         if not isinstance(entry, dict):
             return
         entry.update(updates)
+
+
+def _teammate_matches_workspace_locked(name: str) -> bool:
+    current_workspace = _current_workspace_key()
+    if current_workspace is None:
+        return True
+    entry = active_teammates.get(name)
+    if not isinstance(entry, dict):
+        return True
+    teammate_workspace = entry.get("workspace")
+    return teammate_workspace in (None, current_workspace)
+
+
+def _workspace_visible(workspace: str | None, current_workspace: str | None) -> bool:
+    return current_workspace is None or workspace in (None, current_workspace)
 
 
 def _task_context_from_id(task_id: str) -> dict:
@@ -307,8 +330,22 @@ def _format_teammate_handoff(
 
 
 def team_status() -> str:
+    current_workspace = _current_workspace_key()
     teammates = active_teammates_snapshot()
+    teammates = {
+        name: info
+        for name, info in teammates.items()
+        if (
+            not isinstance(info, dict) or
+            _workspace_visible(info.get("workspace"), current_workspace)
+        )
+    }
     requests = pending_requests_snapshot()
+    requests = {
+        request_id: request
+        for request_id, request in requests.items()
+        if _workspace_visible(request.workspace, current_workspace)
+    }
     lines = ["Active teammates:"]
     if teammates:
         for name, info in sorted(teammates.items()):
@@ -736,6 +773,7 @@ def spawn_teammate_thread(name: str, role: str, prompt: str) -> str:
             "task_id": None,
             "worktree": None,
             "worktree_path": None,
+            "workspace": _current_workspace_key(),
         }
     worker_context = copy_context()
 
@@ -777,7 +815,8 @@ def _teammate_submit_plan(from_name: str, plan: str) -> str:
         pending_requests[req_id] = ProtocolState(
             request_id=req_id, type="plan_approval",
             sender=from_name, target="lead",
-            status="pending", payload=plan)
+            status="pending", payload=plan,
+            workspace=_current_workspace_key())
     try:
         BUS.send(from_name, "lead", plan,
                  "plan_approval_request",
@@ -794,10 +833,13 @@ def _teammate_submit_plan(from_name: str, plan: str) -> str:
 def run_request_shutdown(teammate: str) -> str:
     req_id = new_request_id()
     with _TEAM_STATE_LOCK:
+        if not _teammate_matches_workspace_locked(teammate):
+            return f"Teammate {teammate} not found"
         pending_requests[req_id] = ProtocolState(
             request_id=req_id, type="shutdown",
             sender="lead", target=teammate,
-            status="pending", payload="")
+            status="pending", payload="",
+            workspace=_current_workspace_key())
     try:
         BUS.send("lead", teammate, "Shut down.", "shutdown_request",
                  {"request_id": req_id})
@@ -809,6 +851,9 @@ def run_request_shutdown(teammate: str) -> str:
 
 
 def run_request_plan(teammate: str, task: str) -> str:
+    with _TEAM_STATE_LOCK:
+        if not _teammate_matches_workspace_locked(teammate):
+            return f"Teammate {teammate} not found"
     BUS.send("lead", teammate, f"Submit plan for: {task}", "message")
     return f"Asked {teammate} to submit a plan"
 
@@ -818,6 +863,13 @@ def run_review_plan(request_id: str, approve: bool,
     with _TEAM_STATE_LOCK:
         state = pending_requests.get(request_id)
         if not state:
+            return f"Request {request_id} not found"
+        current_workspace = _current_workspace_key()
+        if (
+            current_workspace is not None and
+            state.workspace is not None and
+            state.workspace != current_workspace
+        ):
             return f"Request {request_id} not found"
         if state.type != "plan_approval":
             return f"Request {request_id} is not a plan approval"

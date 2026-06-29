@@ -1059,7 +1059,6 @@ export default function App() {
     if (selectedSessionIdRef.current === targetSessionId) {
       setCurrentRun(response.run);
       currentRunRef.current = response.run;
-      setMessages(response.messages);
       setTimelineItems(response.timeline ?? []);
       await refreshCurrentSessionData(targetSessionId);
     } else {

@@ -38,7 +38,7 @@ from ..background import (
     start_background_task,
     wait_for_background_task_update,
 )
-from .cancellation import raise_if_cancelled
+from .cancellation import RunCancelled, raise_if_cancelled
 
 
 def _tool_result_count(messages: list) -> int:
@@ -183,53 +183,62 @@ class AgentLoop:
                 log_tool_call_started(block)
                 print(f"\033[36m> {block.name}\033[0m")
 
-                if block.name == "compact":
-                    messages[:] = compact_history(messages)
-                    messages.append(internal_user_message(
-                        "[Compacted. Continue with summarized context.]"
-                    ))
-                    log_tool_call_ended(block, "context compacted", "compacted")
-                    compacted_now = True
-                    break
-
-                blocked = trigger_hooks("PreToolUse", block)
-                raise_if_cancelled()
-                if blocked:
-                    reason = str(blocked)
-                    log_permission_denied(block, reason)
-                    log_tool_call_ended(block, reason, "denied")
-                    results.append({"type": "tool_result",
-                                    "tool_use_id": block.id,
-                                    "content": reason})
-                    continue
-
-                if should_run_background(block.name, block.input):
-                    bg_id = start_background_task(block, handlers)
-                    output = (f"[Background task {bg_id} started] "
-                              "Result will arrive as a task_notification.")
-                    log_tool_call_ended(block, output, "background_started")
-                    results.append({"type": "tool_result",
-                                    "tool_use_id": block.id,
-                                    "content": output})
-                    continue
-
-                handler = handlers.get(block.name)
                 try:
-                    output = call_tool_handler(handler, block.input, block.name)
-                except Exception as e:
-                    log_tool_call_ended(
-                        block, f"{type(e).__name__}: {e}", "failed")
-                    _log_final_stop(
-                        "tool_error",
-                        messages,
-                        tool=getattr(block, "name", None),
-                        tool_use_id=getattr(block, "id", None),
-                        error_type=type(e).__name__,
-                    )
+                    if block.name == "compact":
+                        messages[:] = compact_history(messages)
+                        messages.append(internal_user_message(
+                            "[Compacted. Continue with summarized context.]"
+                        ))
+                        log_tool_call_ended(
+                            block, "context compacted", "compacted")
+                        compacted_now = True
+                        break
+
+                    blocked = trigger_hooks("PreToolUse", block)
+                    raise_if_cancelled()
+                    if blocked:
+                        reason = str(blocked)
+                        log_permission_denied(block, reason)
+                        log_tool_call_ended(block, reason, "denied")
+                        results.append({"type": "tool_result",
+                                        "tool_use_id": block.id,
+                                        "content": reason})
+                        continue
+
+                    if should_run_background(block.name, block.input):
+                        bg_id = start_background_task(block, handlers)
+                        output = (f"[Background task {bg_id} started] "
+                                  "Result will arrive as a task_notification.")
+                        log_tool_call_ended(
+                            block, output, "background_started")
+                        results.append({"type": "tool_result",
+                                        "tool_use_id": block.id,
+                                        "content": output})
+                        continue
+
+                    handler = handlers.get(block.name)
+                    try:
+                        output = call_tool_handler(
+                            handler, block.input, block.name)
+                    except RunCancelled:
+                        raise
+                    except Exception as e:
+                        log_tool_call_ended(
+                            block, f"{type(e).__name__}: {e}", "failed")
+                        _log_final_stop(
+                            "tool_error",
+                            messages,
+                            tool=getattr(block, "name", None),
+                            tool_use_id=getattr(block, "id", None),
+                            error_type=type(e).__name__,
+                        )
+                        raise
+                    trigger_hooks("PostToolUse", block, output)
+                    raise_if_cancelled()
+                    log_tool_call_ended(block, output)
+                except RunCancelled as exc:
+                    log_tool_call_ended(block, str(exc), "cancelled")
                     raise
-                trigger_hooks("PostToolUse", block, output)
-                raise_if_cancelled()
-                log_tool_call_ended(block, output)
                 terminal_print(str(output)[:300])
 
                 if block.name == "todo_write":

@@ -298,6 +298,15 @@ def test_cancel_during_tool_keeps_run_active_until_worker_exits(
         event["type"] for event in _events(client, session_id, run_id)
     ]
     assert "run_cancel_requested" in event_types
+    tool_ended = [
+        event for event in _events(client, session_id, run_id)
+        if event["type"] == "tool_call_ended"
+    ]
+    assert tool_ended
+    assert tool_ended[-1]["payload"]["status"] == "cancelled"
+    assert event_types.index("tool_call_ended") < event_types.index(
+        "run_cancelled"
+    )
     assert event_types[-1] == "run_cancelled"
 
 
